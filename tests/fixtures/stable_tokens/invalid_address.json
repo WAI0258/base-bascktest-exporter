@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "tokens": [
+    {
+      "address": "0x1234",
+      "symbol": "USDC",
+      "name": "USD Coin"
+    }
+  ]
+}
