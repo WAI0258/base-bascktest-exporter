@@ -1,4 +1,12 @@
+pub mod catalog;
 pub mod contract;
+pub mod protocol;
+pub mod source;
+
+pub use catalog::{
+    build_resolved_pool_catalog, build_resolved_pool_catalog_from_json, CatalogError,
+    ResolvedPoolCatalog, ResolvedPoolCatalogEntry, ResolvedTokenRef, UnsupportedOrInvalidPool,
+};
 
 pub use contract::{
     current_lpbot_base_accepts_swap_word_count, protocol_capabilities, validate_current_raw_line,
@@ -10,4 +18,15 @@ pub use contract::{
     V3SwapPayloadShape, CANONICAL_POOL_MANIFEST_FILE, CONTRACT_VERSION, GENERATED_POOLS_FILE,
     MANIFEST_FILE, META_FILE, RAW_DIR, RAW_EVENT_DIRS, STABLE_TOKENS_FILE, STATE_DIR,
     UNRESOLVED_STABLE_SIDE_REPORT_FILE,
+};
+
+pub use protocol::registry::{
+    resolve_protocol, NormalizedProtocol, ProtocolResolution, RawEventFamily, SupportedProtocolSpec,
+};
+
+pub use source::{
+    normalize_evm_address, parse_hex_u64, BaseNodeRpcAdapter, BlockHeaderRef, BlockWithReceiptsRef,
+    HttpIndexerApiClient, HttpJsonRpcClient, IndexerApiAdapter, IndexerHttpClient,
+    IndexerMetadataProvider, IndexerPoolMetadata, IndexerTokenMetadata, JsonRpcClient,
+    ReceiptLogRef, SourceError, TransactionReceiptRef,
 };

@@ -293,6 +293,18 @@ Tests:
 Complexity:
 - medium
 
+Status:
+- accepted as an exporter-only source-adapter batch
+- Base node access is frozen to exporter-owned JSON-RPC adapters for block headers and block receipts
+- `base-dex-indexer` access is frozen to exporter-owned HTTP API adapters for pool and token metadata
+- explicit pool-address selection, protocol normalization, stable-token allowlist matching, and resolved/unresolved catalog splitting are now implemented exporter-side
+- no raw shard writing, state generation, or `lpbot-base` code changes are part of Step 2
+
+Immediate handoff:
+- the next executable batch is Step 3 in the exporter only
+- Step 3 must consume Step 2 resolved catalog outputs instead of re-reading protocol semantics from scratch
+- Step 3 must not change `/home/wayne/lpbot_V3_CLMM`
+
 ### Step 3
 Objective:
 - export replay raw logs for selected pools and block ranges
