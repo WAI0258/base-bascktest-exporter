@@ -1,0 +1,9 @@
+# Default Base WETH/USDC execution case.
+# Checked on 2026-03-27 from public pool rankings/pages:
+# - Uniswap V3 (Base), highest-liquidity WETH/USDC pool: 0x6c561b446416e1a00e8e93e221854d6ea4171372
+#   Source: https://www.geckoterminal.com/base/pools/0x6c561b446416e1a00e8e93e221854d6ea4171372
+# - PancakeSwap V3 (Base), highest-liquidity WETH/USDC pool: 0x72ab388e2e2f6facef59e3c3fa2c4e29011c2d38
+#   Source: https://www.geckoterminal.com/base/pools/0x72ab388e2e2f6facef59e3c3fa2c4e29011c2d38
+
+0x6c561b446416e1a00e8e93e221854d6ea4171372
+0x72ab388e2e2f6facef59e3c3fa2c4e29011c2d38

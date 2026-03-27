@@ -62,6 +62,17 @@ $EDITOR .env
 bash ./deploy.sh export
 ```
 
+Default committed execution case:
+- Uniswap V3 `WETH/USDC` on Base: `0x6c561b446416e1a00e8e93e221854d6ea4171372`
+- PancakeSwap V3 `WETH/USDC` on Base: `0x72ab388e2e2f6facef59e3c3fa2c4e29011c2d38`
+- stable token input: Base `USDC` `0x833589fcd6edb6e08f4c7c32d4f71b54bda02913`
+
+The committed defaults are:
+- `config/default_selected_pools.base_eth_usdc.txt`
+- `config/default_stable_tokens.base_eth_usdc.json`
+
+These defaults were checked on 2026-03-27 against public pool pages/rankings and are intended as the first live export case, not as a forever-frozen liquidity ranking.
+
 `deploy.sh export` will:
 - install Rust via `rustup` automatically if `cargo` is missing
 - load `.env`
@@ -151,9 +162,21 @@ Example:
 0x2222222222222222222222222222222222222222
 ```
 
+For the default live case in this repository, use:
+
+```text
+config/default_selected_pools.base_eth_usdc.txt
+```
+
 ### 2) Prepare `stable_tokens.json`
 
 Use the frozen contract (`version`, `tokens[]`, `address`, `symbol`, `name`).
+
+For the default live case in this repository, use:
+
+```text
+config/default_stable_tokens.base_eth_usdc.json
+```
 
 ### 3) Run `export`
 
