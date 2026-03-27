@@ -157,20 +157,19 @@ Proposed run output layout:
 <RUN_ROOT>/
   meta.json
   manifest.json
+  raw/
+    swap/<from>_<to>.jsonl
+    mint/<from>_<to>.jsonl
+    burn/<from>_<to>.jsonl
+    collect/<from>_<to>.jsonl
+  state/
   pool_manifest.json
   pools.generated.toml
-  shards/
-    <from>_<to>/
-      raw/
-        swap/<from>_<to>.jsonl
-        mint/<from>_<to>.jsonl
-        burn/<from>_<to>.jsonl
-        collect/<from>_<to>.jsonl
-      state/
-        <pool_address>/<from>_<to>.jsonl
-      qa/
-        validation_report.json
 ```
+
+Sharding rule:
+- sharding is represented by `<from>_<to>` file names under top-level `raw/{event}/`
+- no nested `shards/` directory is used in the Step 3 contract
 
 `pool_manifest.json` is the canonical replay metadata payload:
 - pool address
@@ -307,21 +306,25 @@ Immediate handoff:
 
 ### Step 3
 Objective:
-- export replay raw logs for selected pools and block ranges
+- export canonical replay raw logs for selected pools and block ranges
 
 Artifact:
 - `src/export/raw.rs`
 - `src/export/shard.rs`
+- `src/export/mod.rs`
 
 Inputs:
-- receipts
-- block headers
-- selected pools
-- protocol-specific raw handling rules
+- `ResolvedPoolCatalog.resolved`
+- Base node block headers and block receipts
+- block range and shard sizing request
 
 Outputs:
-- shard-local raw jsonl files
-- manifest entries with counts and ranges
+- top-level shard files in `raw/{swap,mint,burn,collect}/<from>_<to>.jsonl`
+- `meta.json` with minimal fields: `chain`, `fromBlock`, `toBlock`, `shardSizeBlocks`, `selectedPoolCount`
+- `manifest.json` with minimal fields: `rawShards`, event totals, `skippedExistingShards`
+- deterministic canonical order `(block_number, transaction_index, log_index)`
+- deterministic dedup key `(block_number, transaction_hash, log_index)`
+- resume-safe rerun: skip existing shard only on manifest/file match over path + non-empty line count + SHA-256 digest, otherwise fail fast
 
 Tests:
 - deterministic ordering tests
@@ -332,14 +335,23 @@ Tests:
 Complexity:
 - medium
 
+Status:
+- accepted and implemented as an exporter-only raw batch
+- writes only raw event files plus `meta.json` and `manifest.json`
+- `manifest.json` now records per-event shard SHA-256 digests for resume validation
+- rerun rejects shard-content tampering, manifest-digest tampering, and legacy manifests missing digests
+- does not generate `state/`, `pool_manifest.json`, or `pools.generated.toml`
+- does not modify `/home/wayne/lpbot_V3_CLMM` or `/home/wayne/base-dex-indexer`
+
 ### Step 4
 Objective:
 - generate replay-driven historical state for swap-consumed blocks as the primary TVL path
 
 Artifact:
-- `src/state/targets.rs`
-- `src/state/engine.rs`
-- `src/state/validate.rs`
+- `src/export/state.rs`
+- `src/source/node_rpc.rs`
+- `src/export/mod.rs`
+- `src/export/shard.rs`
 
 Inputs:
 - exported swap stream
@@ -348,15 +360,28 @@ Inputs:
 
 Outputs:
 - `state/**/*.jsonl` covering replay-consumed swap blocks
-- validation report showing exact coverage and drift checks
+- `state/validation_report.json` with target/checkpoint/fallback/drift details
+- `manifest.json` extended with `stateShards[]` including file digest and generation mode
+- rerun skip over `path + line_count + digest`, with fail-fast mismatch behavior
 
 Tests:
-- coverage tests for selected swap blocks
-- strict validation tests against sampled historical reads
-- resume/restart tests
+- target dedupe tests for same-pool same-block multi-swap input
+- incremental transfer-tracking tests and state-line contract validation
+- checkpoint mismatch fallback tests
+- state rerun skip and resume-mismatch tests (tampered file / missing digest / legacy manifest)
 
 Complexity:
 - high
+
+Status:
+- accepted and implemented as an exporter-only historical-state batch
+- adds `BaseNodeRpcAdapter::eth_call_at_block(...)` and `fetch_erc20_balance(...)`
+- adds `StateExportRequest`, `StateExportResult`, `StateShardManifestEntry`, `StateShardGenerationMode`, and `export_historical_state(...)`
+- writes `state/<pool>/<from>_<to>.jsonl`, `state/validation_report.json`, and `manifest.json.stateShards[]`
+- exporter test policy is implementation-time validation only; persistent regression coverage is intentionally not required for completed earlier steps
+- Step 4 module acceptance test file `tests/export_state.rs` is removed in cleanup under the implementation-time validation-only policy
+- keeps `pool_manifest.json` / `pools.generated.toml` / `lpbot-base` changes out of Step 4 scope
+- does not modify `/home/wayne/lpbot_V3_CLMM` or `/home/wayne/base-dex-indexer`
 
 ### Step 5
 Objective:
@@ -385,6 +410,16 @@ Tests:
 Complexity:
 - medium
 
+Status:
+- accepted and implemented as an exporter-only metadata materialization batch
+- adds `export_replay_metadata(...)` with `MetadataExportRequest` / `MetadataExportResult`
+- writes `pool_manifest.json`, `stable_tokens.json`, `unresolved_stable_side_report.json`, and `pools.generated.toml`
+- enforces stable allowlist duplicate-address fail-fast after normalized-address comparison
+- enforces resolved pool-address duplicate fail-fast after normalized-address comparison so `pool_manifest.json` and `pools.generated.toml` cannot diverge on duplicate pool keys
+- validates JSON artifacts with existing frozen contract validators before atomic write
+- Step 5 module acceptance test file `tests/export_metadata.rs` is removed in cleanup under the implementation-time validation-only policy
+- keeps `manifest.json` / `meta.json` unchanged and does not modify `/home/wayne/lpbot_V3_CLMM` or `/home/wayne/base-dex-indexer`
+
 ### Step 6
 Objective:
 - implement the required `lpbot-base` replay contract upgrades
@@ -411,30 +446,60 @@ Tests:
 Complexity:
 - high
 
+Status:
+- accepted and implemented as an `lpbot-base`-only replay contract batch
+- `lpbot-base` now loads replay-native metadata from `pool_manifest.json`, with local `[pools]` acting only as whitelist + override
+- batch and ordered replay reads now fail fast on missing `blockTimestamp`
+- PancakeV3 7-word `Swap` payloads are accepted natively without exporter-side raw mutation
+- `tvl.mode = none` and `tvl.mode = historical_state` now share the same replay metadata contract
+- crate-level acceptance completed with `CARGO_BUILD_JOBS=1 cargo test -p lpbot-base`
+- no exporter code changes are part of Step 6 acceptance
+
+Immediate handoff:
+- the next executable batch is Step 7
+- Step 7 should stay exporter-only and must not modify `/home/wayne/lpbot_V3_CLMM`
+- Step 7 should include README/doc cleanup so exporter docs stop referring to deleted Step 1 fixtures/tests under the implementation-time-validation-only policy
+
 ### Step 7
 Objective:
-- ship CLI, QA, and end-to-end replay verification
+- ship exporter-only CLI orchestration and verification on top of implemented Step 1-5 core
 
 Artifact:
 - `src/main.rs`
 - `src/cli.rs`
-- `tests/e2e/`
+- `README.md`
+- `deploy.sh`
+- `.env.example`
+- crate-level CLI tests in `src/cli.rs`
 
 Inputs:
-- all previous modules
-- test block ranges for supported protocols
+- all implemented exporter modules from Step 1-5
 
 Outputs:
-- runnable exporter CLI
-- end-to-end dataset that `lpbot-base-backtest` accepts directly in both `tvl.mode = none` and `tvl.mode = historical_state`
+- runnable CLI with exactly `export` and `verify` subcommands
+- fixed `export` flow: selected pools -> stable allowlist -> catalog -> raw -> state -> metadata -> replay-root validate
+- fail-fast when resolved catalog is empty
+- selected-pools-file normalization + duplicate fail-fast
+- local-only `verify` (no RPC/indexer calls)
+- Ubuntu-friendly wrapper script and env template for server-side export runs
+- README fully synced to current state (`Step 1-5 exporter complete`, `Step 6 done in lpbot-base`, implementation-time-validation-only policy)
 
 Tests:
-- crate-level CLI tests
-- end-to-end dataset generation test
-- replay acceptance test by invoking `lpbot-base` on produced shards
+- CLI mandatory flag parsing tests
+- selected-pools-file normalization/invalid/duplicate tests
+- export orchestration tests with mock indexer + mock RPC, including resume skip behavior
+- verify success/failure tests for valid and broken replay roots
+- crate-level execution: `TMPDIR=/tmp TMP=/tmp TEMP=/tmp CARGO_BUILD_JOBS=1 cargo test`
 
 Complexity:
 - high
+
+Status:
+- accepted and implemented as an exporter-only batch
+- CLI binary now exists via `src/main.rs` and `src/cli.rs`
+- repo now includes `deploy.sh` plus committed `.env.example` and local `.env` workflow for Ubuntu deployment
+- Step 7 does not modify `/home/wayne/lpbot_V3_CLMM` or `/home/wayne/base-dex-indexer`
+- exporter docs are synced to current Step 7 behavior and acceptance flow
 
 ## Main Risks
 

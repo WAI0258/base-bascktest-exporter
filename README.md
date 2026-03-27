@@ -1,181 +1,206 @@
-# Base Backtest Exporter Step 1 Contract Freeze
+# Base Backtest Exporter
 
-This crate owns the Step 1 replay contract freeze for Base backtest export.
+`base-backtest-exporter` is a standalone exporter for Base replay datasets.
 
-Scope locked in this step:
-- freeze the replay dataset contract only
-- document current `lpbot-base` assumptions versus the target contract
-- ship schema types, validation helpers, fixtures, and crate-level contract tests
+Current status:
+- Step 1-5 exporter core is implemented in this repository.
+- Step 6 (`lpbot-base` replay-native metadata + decoder upgrades) is implemented in `/home/wayne/lpbot_V3_CLMM`.
+- This repository does not modify `lpbot-base` at runtime.
 
-Explicitly out of scope in this step:
-- source adapters
-- raw export
-- state generation
-- `lpbot-base` runtime changes
-
-## Repository Boundary
+## Scope
 
 Implemented here:
-- replay contract spec
-- replay root layout validation
-- protocol capability matrix
-- `lpbot-base` gap list
-- Step 1 fixtures and tests
+- replay contract validation (`raw/`, `state/`, `meta.json`, `manifest.json`, `pool_manifest.json`)
+- source adapters (Base node JSON-RPC + indexer HTTP metadata)
+- raw shard export (deterministic order/dedup + resume checks)
+- historical state export (swap-target-driven + validation/fallback)
+- metadata export (`pool_manifest.json`, `stable_tokens.json`, `unresolved_stable_side_report.json`, `pools.generated.toml`)
+- CLI orchestration (`export`, `verify`)
 
-Referenced read-only from `/home/wayne/lpbot_V3_CLMM/crates/lpbot-base`:
-- current `RawTopicLog` shape
-- current replay/state validation behavior
-- current decoder limits
-- current `[pools]` metadata dependency
+Not implemented here:
+- `lpbot-base` runtime logic
+- `base-dex-indexer` server-side changes
 
-## Current Contract vs Target Contract
+## Historical Gaps (Resolved In Step 6)
 
-Current `lpbot-base` contract facts:
-- `RawTopicLog.blockTimestamp` is optional in `src/raw/types.rs`
-- missing `blockTimestamp` is normalized to `timestamp_ms = 0` in `src/raw/reader.rs`
-- `historical_state` lookup is strict on exact `(pool_address, block_number)` in `src/state/mod.rs`
-- replay TVL and `amount_in_usd` still depend on `[pools]` metadata in `src/pipeline.rs`
-- `Swap.data` is decoded as exactly 5 ABI words in `src/decode/uniswap_v3.rs`
+These are no longer active gaps in `lpbot-base`:
+- replay-native metadata loading from `pool_manifest.json`
+- strict replay fail-fast for missing `blockTimestamp`
+- PancakeV3 7-word swap payload support in the shared V3 decoder
 
-Target replay contract frozen by Step 1:
-- replay root contains `raw/`, `state/`, `pool_manifest.json`, `manifest.json`, `meta.json`
-- `pools.generated.toml` is optional transitional compatibility output generated from `pool_manifest.json`
-- target raw logs preserve canonical protocol payloads; exporter does not rewrite PancakeV3 swap payloads in Step 1
-- `RawTopicLog.blockTimestamp` is required for target replay datasets
-- `state` lines are fixed to `pool_address`, `block_number`, `token0_balance_raw`, `token1_balance_raw`
-- `pool_manifest.json` is canonical replay metadata and requires explicit boolean `token0_is_stable` / `token1_is_stable`
-- stable-side canonical source is a token-address allowlist (`stable_tokens.json`), not symbol/name inference
-- unresolved pools never enter canonical `pool_manifest.json`; they are emitted to `unresolved_stable_side_report.json` for allowlist maintenance
-- replay dataset metadata is canonical; local `[pools]` becomes override or fallback in later `lpbot-base` work
-- `tvl.mode = none` and `tvl.mode = historical_state` share the same replay dataset; the difference is only whether `state/` is read
+## Test Policy
 
-## Target Replay Root Layout
+Implementation-time validation only:
+- step-specific module acceptance tests can be removed after a step is accepted
+- long-lived checks are crate-level tests that still provide value for current contract and behavior
+
+Current crate-level validation command:
+
+```bash
+TMPDIR=/tmp TMP=/tmp TEMP=/tmp CARGO_BUILD_JOBS=1 cargo test
+```
+
+## CLI
+
+The binary provides exactly two subcommands:
+- `export`
+- `verify`
+
+## Ubuntu Quick Start
+
+This repository now includes:
+- committed template: `.env.example`
+- local config file: `.env` (gitignored)
+- one-command wrapper: `deploy.sh`
+
+Recommended first use on the server:
+
+```bash
+cd /home/wayne/lp/base-backtest-exporter
+cp .env.example .env
+$EDITOR .env
+bash ./deploy.sh export
+```
+
+`deploy.sh export` will:
+- install Rust via `rustup` automatically if `cargo` is missing
+- load `.env`
+- run exporter `export`
+- run exporter `verify` automatically when `VERIFY_AFTER_EXPORT=1`
+
+Other modes:
+
+```bash
+bash ./deploy.sh build
+bash ./deploy.sh verify
+```
+
+### `export` Required Flags
+
+- `--run-root <path>`
+- `--rpc-url <url>`
+- `--indexer-url <url>`
+- `--selected-pools-file <path>`
+- `--stable-tokens-file <path>`
+- `--from-block <u64>`
+- `--to-block <u64>`
+- `--shard-size-blocks <u64>`
+- `--validation-stride-targets <u64>`
+
+### `selected-pools-file` Contract
+
+- UTF-8 text file
+- one pool address per line
+- blank lines allowed
+- comment lines starting with `#` allowed
+- each non-comment line is trimmed, normalized to lowercase EVM address
+- duplicate addresses after normalization fail fast (no silent dedupe)
+
+### `export` Execution Order
+
+`export` runs the fixed sequence:
+1. read and validate selected pools file
+2. read and validate `stable_tokens.json`
+3. build resolved pool catalog from indexer metadata + allowlist
+4. fail fast when `resolved == 0`
+5. run raw export
+6. run historical state export
+7. run replay metadata export
+8. validate replay root layout/contracts locally
+9. print summary (resolved/unresolved/unsupported + raw/state/metadata counts + run root)
+
+`unresolved_stable_side` and `unsupported_or_invalid` do not block export when `resolved > 0`.
+
+`export` keeps existing resume semantics. There is no force-overwrite mode.
+
+### `verify`
+
+- required flag: `--run-root <path>`
+- validates replay root locally using contract/root validators
+- does not call RPC and does not call indexer
+
+## Output Layout
 
 ```text
-<REPLAY_ROOT>/
+<RUN_ROOT>/
   raw/
-    swap/
-    mint/
-    burn/
-    collect/
+    swap/<from>_<to>.jsonl
+    mint/<from>_<to>.jsonl
+    burn/<from>_<to>.jsonl
+    collect/<from>_<to>.jsonl
   state/
-  pool_manifest.json
-  manifest.json
+    <pool_address>/<from>_<to>.jsonl
+    validation_report.json
   meta.json
-  pools.generated.toml        # optional transitional compatibility output
+  manifest.json
+  pool_manifest.json
+  stable_tokens.json
+  unresolved_stable_side_report.json
+  pools.generated.toml
 ```
 
-`manifest.json` and `meta.json` are frozen in Step 1 as required JSON-object placeholders. Their detailed field set can expand later without changing the root layout contract.
-`unresolved_stable_side_report.json` is not a required replay-root file and is not consumed by `lpbot-base`; it only supports manual stable-token allowlist review.
+## Minimal Usage
 
-## Target Data Shapes
+### 1) Prepare `selected-pools-file`
 
-Target raw line:
-- identical to the current `lpbot-base` `RawTopicLog` field set
-- `blockTimestamp` is required, not optional
+Example:
 
-Target state line:
-- `pool_address`
-- `block_number`
-- `token0_balance_raw`
-- `token1_balance_raw`
-
-Target `pool_manifest.json`:
-- top-level `version`
-- top-level `pools`
-- per pool:
-  - `pool_address`
-  - `protocol`
-  - `token0.address`
-  - `token0.decimals`
-  - `token1.address`
-  - `token1.decimals`
-  - `fee_tier`
-  - `token0_is_stable`
-  - `token1_is_stable`
-
-Validation rule:
-- `version` must equal `CONTRACT_VERSION`
-- `token0_is_stable` and `token1_is_stable` are required booleans (no tri-state / nullable form)
-
-Target `stable_tokens.json` (frozen input contract):
-- top-level `version`
-- top-level `tokens`
-- per token:
-  - `address`
-  - `symbol`
-  - `name`
-
-Target `unresolved_stable_side_report.json` (review artifact):
-- top-level `version`
-- top-level `items`
-- per item:
-  - `pool_address`
-  - `token0.address`
-  - `token1.address`
-  - `reason`
-
-Minimal manifest example:
-
-```json
-{
-  "version": 1,
-  "pools": [
-    {
-      "pool_address": "0x1111111111111111111111111111111111111111",
-      "protocol": "UniswapV3",
-      "token0": {
-        "address": "0x2222222222222222222222222222222222222222",
-        "decimals": 6
-      },
-      "token1": {
-        "address": "0x3333333333333333333333333333333333333333",
-        "decimals": 18
-      },
-      "fee_tier": 500,
-      "token0_is_stable": true,
-      "token1_is_stable": false
-    }
-  ]
-}
+```text
+# Base V3 pools
+0x1111111111111111111111111111111111111111
+0x2222222222222222222222222222222222222222
 ```
 
-## Protocol Capability Matrix
+### 2) Prepare `stable_tokens.json`
 
-Matrix rule: this table records whether the target replay contract accepts canonical raw payloads unchanged.
+Use the frozen contract (`version`, `tokens[]`, `address`, `symbol`, `name`).
 
-| Protocol | Swap | Mint | Burn | Collect | Note |
-| --- | --- | --- | --- | --- | --- |
-| UniswapV3 | Accepted | Accepted | Accepted | Accepted | Common V3 path |
-| SushiV3 / SushiswapV3 | Accepted | Accepted | Accepted | Accepted | `base-dex-indexer` treats Sushi V3 as UniswapV3-compatible |
-| AerodromeV3 / Slipstream | Accepted | Accepted | Accepted | Accepted | `base-dex-indexer` documents the same event structure as UniswapV3 |
-| PancakeV3 | Accepted, but current `lpbot-base` decoder gap remains | Accepted | Accepted | Accepted | Native raw swap is 7 ABI words; Step 1 freezes the decoder-upgrade path instead of exporter-side rewrite |
+### 3) Run `export`
 
-## `lpbot-base` Gap List
+```bash
+cd /home/wayne/lp/base-backtest-exporter
+bash ./deploy.sh export
+```
 
-Frozen gaps to address later:
-- replay-native metadata is missing; current replay still requires `[pools]` as the primary metadata source
-- stable metadata precedence (replay metadata vs local config) still needs explicit `lpbot-base` implementation
-- current `historical_state` lookup must keep exact `(pool, block)` matching; this is not relaxed by Step 1
-- current PancakeV3 `Swap.data` support is limited to the 5-word UniswapV3 shape
-- replay validation must become fail-fast for missing target-contract metadata and missing `blockTimestamp`
+Equivalent raw CLI form:
 
-## Step 1 Test Surface
+```bash
+cd /home/wayne/lp/base-backtest-exporter
+TMPDIR=/tmp TMP=/tmp TEMP=/tmp CARGO_BUILD_JOBS=1 cargo run --release -- export \
+  --run-root /tmp/base_replay_run \
+  --rpc-url http://127.0.0.1:8545 \
+  --indexer-url http://127.0.0.1:8080 \
+  --selected-pools-file /tmp/selected_pools.txt \
+  --stable-tokens-file /tmp/stable_tokens.json \
+  --from-block 27800000 \
+  --to-block 27801000 \
+  --shard-size-blocks 200 \
+  --validation-stride-targets 20
+```
 
-Fixtures included under `tests/fixtures/`:
-- standard V3 raw
-- target-invalid raw missing `blockTimestamp`
-- PancakeV3 raw with native 7-word swap payload
-- valid and invalid `state` lines
-- valid and invalid `pool_manifest.json` (including version mismatch)
-- valid and invalid `stable_tokens.json`
-- valid and invalid `unresolved_stable_side_report.json`
+### 4) Run `verify`
 
-Crate tests cover:
-- target raw acceptance for standard V3 and PancakeV3 fixtures
-- rejection of raw lines missing `blockTimestamp`
-- `state` line shape validation
-- `pool_manifest.json` required-field and version validation
-- `stable_tokens.json` required-field and address-format validation
-- `unresolved_stable_side_report.json` required-field validation
-- replay root layout validation
+```bash
+cd /home/wayne/lp/base-backtest-exporter
+bash ./deploy.sh verify
+```
+
+## Manual Cross-Repo Acceptance (`lpbot-base-backtest`)
+
+Exporter does not invoke sibling repositories automatically. Use manual acceptance in `/home/wayne/lpbot_V3_CLMM`.
+
+### `tvl.mode = none`
+
+```bash
+cd /home/wayne/lpbot_V3_CLMM
+CONFIG_FILE=/tmp/config.base.none.toml CARGO_BUILD_JOBS=1 cargo run -p lpbot-base --bin lpbot-base-backtest
+```
+
+### `tvl.mode = historical_state`
+
+```bash
+cd /home/wayne/lpbot_V3_CLMM
+CONFIG_FILE=/tmp/config.base.historical_state.toml CARGO_BUILD_JOBS=1 cargo run -p lpbot-base --bin lpbot-base-backtest
+```
+
+Both config files should point `[replay].data_roots` to the exported `<RUN_ROOT>`.
