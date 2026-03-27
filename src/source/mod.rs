@@ -68,12 +68,11 @@ pub enum SourceError {
 }
 
 pub fn normalize_evm_address(field: &'static str, value: &str) -> Result<String, SourceError> {
-    let normalized = normalize_prefixed_hex(field, value, 40).map_err(|_| {
-        SourceError::InvalidAddress {
+    let normalized =
+        normalize_prefixed_hex(field, value, 40).map_err(|_| SourceError::InvalidAddress {
             field,
             value: value.to_owned(),
-        }
-    })?;
+        })?;
     Ok(normalized)
 }
 
@@ -91,6 +90,30 @@ pub fn normalize_prefixed_hex(
             value: value.to_owned(),
         })?;
     if digits.len() != expected_nibbles || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(SourceError::InvalidHexScalar {
+            field,
+            value: value.to_owned(),
+        });
+    }
+    Ok(format!("0x{}", digits.to_ascii_lowercase()))
+}
+
+pub fn normalize_hex_bytes(field: &'static str, value: &str) -> Result<String, SourceError> {
+    let trimmed = value.trim();
+    let digits = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .ok_or_else(|| SourceError::InvalidHexScalar {
+            field,
+            value: value.to_owned(),
+        })?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(SourceError::InvalidHexScalar {
+            field,
+            value: value.to_owned(),
+        });
+    }
+    if digits.len() % 2 != 0 {
         return Err(SourceError::InvalidHexScalar {
             field,
             value: value.to_owned(),

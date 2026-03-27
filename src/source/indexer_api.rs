@@ -44,10 +44,12 @@ impl IndexerHttpClient for HttpIndexerApiClient {
                 status: status.as_u16(),
             });
         }
-        response.json::<Value>().map_err(|error| SourceError::HttpRequest {
-            url: url.to_owned(),
-            message: format!("failed to decode indexer json: {error}"),
-        })
+        response
+            .json::<Value>()
+            .map_err(|error| SourceError::HttpRequest {
+                url: url.to_owned(),
+                message: format!("failed to decode indexer json: {error}"),
+            })
     }
 }
 

@@ -1,5 +1,7 @@
 pub mod catalog;
+pub mod cli;
 pub mod contract;
+pub mod export;
 pub mod protocol;
 pub mod source;
 
@@ -18,6 +20,13 @@ pub use contract::{
     V3SwapPayloadShape, CANONICAL_POOL_MANIFEST_FILE, CONTRACT_VERSION, GENERATED_POOLS_FILE,
     MANIFEST_FILE, META_FILE, RAW_DIR, RAW_EVENT_DIRS, STABLE_TOKENS_FILE, STATE_DIR,
     UNRESOLVED_STABLE_SIDE_REPORT_FILE,
+};
+
+pub use export::{
+    export_historical_state, export_raw_range, export_replay_metadata, ExportError,
+    MetadataExportRequest, MetadataExportResult, RawEventCounts, RawExportRequest, RawExportResult,
+    RawExportTotals, RawShardDigests, RawShardFiles, RawShardManifestEntry, StateExportRequest,
+    StateExportResult, StateShardGenerationMode, StateShardManifestEntry,
 };
 
 pub use protocol::registry::{
