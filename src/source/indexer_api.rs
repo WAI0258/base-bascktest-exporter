@@ -58,25 +58,30 @@ pub struct IndexerPoolMetadata {
     pub address: String,
     pub protocol: String,
     pub tokens: Vec<String>,
+    pub factory_address: Option<String>,
     pub creation_block_number: Option<u64>,
     pub fee: Option<u32>,
     pub tick_spacing: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IndexerTokenMetadata {
+pub struct TokenMetadataRef {
     pub address: String,
     pub decimals: u8,
-    pub symbol: Option<String>,
-    pub name: Option<String>,
+    pub symbol: String,
+    pub name: String,
 }
 
-pub trait IndexerMetadataProvider {
+pub trait PoolMetadataProvider {
     fn fetch_pool_metadata(&self, pool_address: &str) -> Result<IndexerPoolMetadata, SourceError>;
+}
+
+pub trait TokenMetadataProvider {
     fn fetch_token_metadata(
         &self,
         token_address: &str,
-    ) -> Result<IndexerTokenMetadata, SourceError>;
+        block_number: u64,
+    ) -> Result<Option<TokenMetadataRef>, SourceError>;
 }
 
 #[derive(Debug, Clone)]
@@ -129,7 +134,7 @@ where
     }
 }
 
-impl<C> IndexerMetadataProvider for IndexerApiAdapter<C>
+impl<C> PoolMetadataProvider for IndexerApiAdapter<C>
 where
     C: IndexerHttpClient,
 {
@@ -150,28 +155,14 @@ where
             address: normalize_evm_address("pool.address", &pool.address)?,
             protocol: pool.protocol,
             tokens,
+            factory_address: pool
+                .factory_address
+                .as_deref()
+                .map(|address| normalize_evm_address("pool.factory_address", address))
+                .transpose()?,
             creation_block_number: pool.creation_block_number,
             fee: pool.fee,
             tick_spacing: pool.tick_spacing,
-        })
-    }
-
-    fn fetch_token_metadata(
-        &self,
-        token_address: &str,
-    ) -> Result<IndexerTokenMetadata, SourceError> {
-        let normalized_token = normalize_evm_address("token_address", token_address)?;
-        let payload = self.fetch_wrapped::<TokenEnvelope>(
-            "token",
-            &normalized_token,
-            &format!("tokens/{normalized_token}"),
-        )?;
-        let token = payload.token;
-        Ok(IndexerTokenMetadata {
-            address: normalize_evm_address("token.address", &token.address)?,
-            decimals: token.decimals,
-            symbol: token.symbol,
-            name: token.name,
         })
     }
 }
@@ -186,20 +177,8 @@ struct PoolResponseDto {
     address: String,
     protocol: String,
     tokens: Vec<String>,
+    factory_address: Option<String>,
     creation_block_number: Option<u64>,
     fee: Option<u32>,
     tick_spacing: Option<i32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TokenEnvelope {
-    token: TokenResponseDto,
-}
-
-#[derive(Debug, Deserialize)]
-struct TokenResponseDto {
-    address: String,
-    decimals: u8,
-    symbol: Option<String>,
-    name: Option<String>,
 }

@@ -16,6 +16,10 @@ Environment:
   By default the script loads ./.env.
   Override with:
     ENV_FILE=/path/to/file.env bash ./deploy.sh export
+
+Optional export chunking:
+  Set EXPORT_CHUNK_BLOCKS to split one large block range into sequential
+  sub-runs against the same RUN_ROOT.
 EOF
 }
 
@@ -91,6 +95,15 @@ require_export_env() {
   mkdir -p "$(dirname -- "$RUN_ROOT")"
 }
 
+require_positive_integer() {
+  local name="$1"
+  local value="${!name:-}"
+  if [[ ! "$value" =~ ^[0-9]+$ ]] || (( value <= 0 )); then
+    echo "env var $name must be a positive integer, got: ${value:-<empty>}" >&2
+    exit 1
+  fi
+}
+
 cargo_args() {
   if [[ "${EXPORTER_PROFILE:-release}" == "release" ]]; then
     printf '%s\n' run --release
@@ -99,20 +112,67 @@ cargo_args() {
   fi
 }
 
+build_export_cmd() {
+  local from_block="$1"
+  local to_block="$2"
+  mapfile -t base_args < <(cargo_args)
+  cmd=(
+    "${base_args[@]}" -- export
+    --run-root "$RUN_ROOT"
+    --rpc-url "$RPC_URL"
+    --indexer-url "$INDEXER_URL"
+    --selected-pools-file "$SELECTED_POOLS_FILE"
+    --stable-tokens-file "$STABLE_TOKENS_FILE"
+    --from-block "$from_block"
+    --to-block "$to_block"
+    --shard-size-blocks "$SHARD_SIZE_BLOCKS"
+    --validation-stride-targets "$VALIDATION_STRIDE_TARGETS"
+  )
+
+  if [[ -n "${TOKEN_OVERRIDES_FILE:-}" ]]; then
+    require_file TOKEN_OVERRIDES_FILE "$TOKEN_OVERRIDES_FILE"
+    cmd+=(--token-overrides-file "$TOKEN_OVERRIDES_FILE")
+  fi
+}
+
+run_export_once() {
+  local from_block="$1"
+  local to_block="$2"
+  build_export_cmd "$from_block" "$to_block"
+  cargo "${cmd[@]}"
+}
+
 run_export() {
   require_export_env
 
-  mapfile -t base_args < <(cargo_args)
-  cargo "${base_args[@]}" -- export \
-    --run-root "$RUN_ROOT" \
-    --rpc-url "$RPC_URL" \
-    --indexer-url "$INDEXER_URL" \
-    --selected-pools-file "$SELECTED_POOLS_FILE" \
-    --stable-tokens-file "$STABLE_TOKENS_FILE" \
-    --from-block "$FROM_BLOCK" \
-    --to-block "$TO_BLOCK" \
-    --shard-size-blocks "$SHARD_SIZE_BLOCKS" \
-    --validation-stride-targets "$VALIDATION_STRIDE_TARGETS"
+  if (( FROM_BLOCK > TO_BLOCK )); then
+    echo "FROM_BLOCK must be <= TO_BLOCK" >&2
+    exit 1
+  fi
+
+  if [[ -n "${EXPORT_CHUNK_BLOCKS:-}" ]]; then
+    require_positive_integer EXPORT_CHUNK_BLOCKS
+
+    local total_chunks=$(( (TO_BLOCK - FROM_BLOCK) / EXPORT_CHUNK_BLOCKS + 1 ))
+    local chunk_index=1
+    local chunk_from="$FROM_BLOCK"
+    local chunk_to
+
+    while (( chunk_from <= TO_BLOCK )); do
+      chunk_to=$(( chunk_from + EXPORT_CHUNK_BLOCKS - 1 ))
+      if (( chunk_to > TO_BLOCK )); then
+        chunk_to=$TO_BLOCK
+      fi
+
+      echo "[deploy] export chunk ${chunk_index}/${total_chunks}: ${chunk_from}-${chunk_to}" >&2
+      run_export_once "$chunk_from" "$chunk_to"
+
+      chunk_from=$(( chunk_to + 1 ))
+      chunk_index=$(( chunk_index + 1 ))
+    done
+  else
+    run_export_once "$FROM_BLOCK" "$TO_BLOCK"
+  fi
 
   if [[ "${VERIFY_AFTER_EXPORT:-1}" == "1" ]]; then
     run_verify

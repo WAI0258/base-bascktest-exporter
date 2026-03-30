@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -14,6 +15,7 @@ pub const META_FILE: &str = "meta.json";
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const CANONICAL_POOL_MANIFEST_FILE: &str = "pool_manifest.json";
 pub const STABLE_TOKENS_FILE: &str = "stable_tokens.json";
+pub const TOKEN_OVERRIDES_FILE: &str = "token_overrides.json";
 pub const UNRESOLVED_STABLE_SIDE_REPORT_FILE: &str = "unresolved_stable_side_report.json";
 pub const GENERATED_POOLS_FILE: &str = "pools.generated.toml";
 pub const RAW_EVENT_DIRS: [&str; 4] = ["swap", "mint", "burn", "collect"];
@@ -138,6 +140,20 @@ pub struct StableTokenList {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StableTokenEntry {
     pub address: String,
+    pub symbol: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenOverrideList {
+    pub version: u32,
+    pub tokens: Vec<TokenOverrideEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenOverrideEntry {
+    pub address: String,
+    pub decimals: u8,
     pub symbol: String,
     pub name: String,
 }
@@ -288,6 +304,31 @@ pub fn validate_stable_token_list_str(contents: &str) -> Result<StableTokenList,
         validate_non_empty("tokens[].name", &token.name)?;
     }
     Ok(stable_tokens)
+}
+
+pub fn validate_token_override_list_str(
+    contents: &str,
+) -> Result<TokenOverrideList, ContractError> {
+    let token_overrides = parse_json::<TokenOverrideList>(contents, TOKEN_OVERRIDES_FILE)?;
+    validate_contract_version("version", token_overrides.version)?;
+
+    let mut seen = HashSet::<String>::new();
+    for token in &token_overrides.tokens {
+        let normalized = normalize_contract_address("tokens[].address", &token.address)?;
+        if !seen.insert(normalized.clone()) {
+            return Err(ContractError::InvalidField {
+                field: "tokens[].address",
+                message: format!(
+                    "duplicate token override address after normalization: {normalized}"
+                ),
+            });
+        }
+
+        validate_non_empty("tokens[].symbol", &token.symbol)?;
+        validate_non_empty("tokens[].name", &token.name)?;
+    }
+
+    Ok(token_overrides)
 }
 
 pub fn validate_unresolved_stable_side_report_str(
@@ -442,6 +483,17 @@ fn validate_non_empty(field: &'static str, value: &str) -> Result<(), ContractEr
 
 fn validate_address(field: &'static str, value: &str) -> Result<(), ContractError> {
     validate_prefixed_hex(field, value, 40)
+}
+
+fn normalize_contract_address(field: &'static str, value: &str) -> Result<String, ContractError> {
+    validate_address(field, value)?;
+    let digits = value
+        .strip_prefix("0x")
+        .ok_or_else(|| ContractError::InvalidField {
+            field,
+            message: "value must start with 0x".to_owned(),
+        })?;
+    Ok(format!("0x{}", digits.to_ascii_lowercase()))
 }
 
 fn validate_fixed_hex(

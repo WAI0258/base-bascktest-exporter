@@ -1,0 +1,19 @@
+# Base WETH/USDC top-5 concentrated-liquidity pools by 24h trading volume across DEXs.
+# Checked on 2026-04-01 from GeckoTerminal pool pages.
+# Included protocols are Uniswap V3 or similar concentrated-liquidity designs.
+# 1) Uniswap V3 (Base) 0.3%  - 0x6c561b446416e1a00e8e93e221854d6ea4171372 - 24h Vol $110.28M
+#    Source: https://www.geckoterminal.com/base/pools/0x6c561b446416e1a00e8e93e221854d6ea4171372
+# 2) Pancakeswap V3 (Base) 0.01% - 0x72ab388e2e2f6facef59e3c3fa2c4e29011c2d38 - 24h Vol $82.25M
+#    Source: https://www.geckoterminal.com/base/pools/0x72ab388e2e2f6facef59e3c3fa2c4e29011c2d38
+# 3) Aerodrome SlipStream 0.05% - 0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59 - 24h Vol $68.71M
+#    Source: https://www.geckoterminal.com/base/pools/0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59
+# 4) Uniswap V3 (Base) 0.05% - 0xd0b53d9277642d899df5c87a3966a349a798f224 - 24h Vol $39.26M
+#    Source: https://www.geckoterminal.com/base/pools/0xd0b53d9277642d899df5c87a3966a349a798f224
+# 5) Aerodrome SlipStream 0.01% - 0xdbc6998296caa1652a810dc8d3baf4a8294330f1 - 24h Vol $16.73M
+#    Source: https://www.geckoterminal.com/base/pools/0xdbc6998296caa1652a810dc8d3baf4a8294330f1
+
+0x6c561b446416e1a00e8e93e221854d6ea4171372
+0x72ab388e2e2f6facef59e3c3fa2c4e29011c2d38
+0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59
+0xd0b53d9277642d899df5c87a3966a349a798f224
+0xdbc6998296caa1652a810dc8d3baf4a8294330f1

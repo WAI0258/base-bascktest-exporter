@@ -1,13 +1,17 @@
+mod fallback_token;
 mod indexer_api;
 mod node_rpc;
+mod pool_metadata_backfill;
 
 use thiserror::Error;
 
+pub use fallback_token::FallbackTokenMetadataProvider;
 pub use indexer_api::{
-    HttpIndexerApiClient, IndexerApiAdapter, IndexerHttpClient, IndexerMetadataProvider,
-    IndexerPoolMetadata, IndexerTokenMetadata,
+    HttpIndexerApiClient, IndexerApiAdapter, IndexerHttpClient, IndexerPoolMetadata,
+    PoolMetadataProvider, TokenMetadataProvider, TokenMetadataRef,
 };
 pub use node_rpc::{BaseNodeRpcAdapter, HttpJsonRpcClient, JsonRpcClient};
+pub use pool_metadata_backfill::RpcBackfilledPoolMetadataProvider;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockHeaderRef {

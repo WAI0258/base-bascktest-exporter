@@ -316,14 +316,15 @@ fn try_skip_existing_state_shard(
         return Ok(None);
     }
 
-    let entry = existing_entry.ok_or_else(|| ExportError::ResumeMismatch {
+    let entry = existing_entry.unwrap_or(StateShardManifestEntry {
+        pool_address: pool_address.to_owned(),
         from_block: range.from_block,
         to_block: range.to_block,
-        message: format!(
-            "state shard file exists but stateShards entry is missing for pool {}",
-            pool_address
-        ),
-    })?;
+        line_count: count_jsonl_lines(&expected_abs)?,
+        file: expected_rel.clone(),
+        digest: sha256_hex_file_bytes(&expected_abs)?,
+        generation_mode: StateShardGenerationMode::IncrementalValidated,
+    });
 
     if entry.file != expected_rel {
         return Err(ExportError::ResumeMismatch {
@@ -403,41 +404,80 @@ fn build_transfer_deltas_by_pool(
                 if !is_transfer_topic(log.topics.first()) {
                     continue;
                 }
-                if log.topics.len() < 3 {
-                    continue;
-                }
-                let from_address = decode_topic_address("transfer.topic1", &log.topics[1])?;
-                let to_address = decode_topic_address("transfer.topic2", &log.topics[2])?;
-                let amount = parse_hex_u256_to_bigint("transfer.data", &log.data)?;
-                if amount.is_zero() {
-                    continue;
-                }
 
-                if tracked_pools.contains(from_address.as_str()) {
-                    apply_transfer_delta(
-                        &mut out,
-                        block.header.block_number,
-                        &from_address,
-                        &log.address,
-                        &(-amount.clone()),
-                        pool_meta_map,
-                    );
-                }
-                if to_address != from_address && tracked_pools.contains(to_address.as_str()) {
-                    apply_transfer_delta(
-                        &mut out,
-                        block.header.block_number,
-                        &to_address,
-                        &log.address,
-                        &amount,
-                        pool_meta_map,
-                    );
+                match log.topics.len() {
+                    3 => {
+                        let from_address = decode_topic_address("transfer.topic1", &log.topics[1])?;
+                        let to_address = decode_topic_address("transfer.topic2", &log.topics[2])?;
+                        let applies_to_from_pool = tracked_pools.contains(from_address.as_str())
+                            && pool_tracks_token(pool_meta_map, &from_address, &log.address);
+                        let applies_to_to_pool = to_address != from_address
+                            && tracked_pools.contains(to_address.as_str())
+                            && pool_tracks_token(pool_meta_map, &to_address, &log.address);
+                        if !applies_to_from_pool && !applies_to_to_pool {
+                            continue;
+                        }
+
+                        let amount = parse_hex_u256_to_bigint("transfer.data", &log.data).map_err(
+                            |error| match error {
+                                ExportError::InvalidRequest { message } => {
+                                    ExportError::InvalidRequest {
+                                        message: format!(
+                                            "{message}; token/log address={}, block_number={}, tx_hash={}, log_index={}",
+                                            log.address,
+                                            receipt.block_number,
+                                            receipt.transaction_hash,
+                                            log.log_index
+                                        ),
+                                    }
+                                }
+                                other => other,
+                            },
+                        )?;
+                        if amount.is_zero() {
+                            continue;
+                        }
+
+                        if applies_to_from_pool {
+                            apply_transfer_delta(
+                                &mut out,
+                                block.header.block_number,
+                                &from_address,
+                                &log.address,
+                                &(-amount.clone()),
+                                pool_meta_map,
+                            );
+                        }
+                        if applies_to_to_pool {
+                            apply_transfer_delta(
+                                &mut out,
+                                block.header.block_number,
+                                &to_address,
+                                &log.address,
+                                &amount,
+                                pool_meta_map,
+                            );
+                        }
+                    }
+                    4 => continue,
+                    _ => continue,
                 }
             }
         }
     }
 
     Ok(out)
+}
+
+fn pool_tracks_token(
+    pool_meta_map: &HashMap<String, PoolTokenMeta>,
+    pool_address: &str,
+    token_address: &str,
+) -> bool {
+    match pool_meta_map.get(pool_address) {
+        Some(meta) => token_address == meta.token0 || token_address == meta.token1,
+        None => false,
+    }
 }
 
 fn apply_transfer_delta(
@@ -651,15 +691,14 @@ fn parse_decimal_to_bigint(field: &'static str, value: &str) -> Result<BigInt, E
 }
 
 fn parse_hex_u256_to_bigint(field: &'static str, value: &str) -> Result<BigInt, ExportError> {
-    let digits = value
+    let trimmed = value.trim();
+    let digits = trimmed
         .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-        .ok_or_else(|| ExportError::InvalidRequest {
-            message: format!("{field} must be a 0x-prefixed hex string"),
-        })?;
-    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        .or_else(|| trimmed.strip_prefix("0X"))
+        .unwrap_or(trimmed);
+    if digits.len() != 64 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(ExportError::InvalidRequest {
-            message: format!("{field} must contain only hex digits"),
+            message: format!("{field} must be exactly 64 hex chars (optional 0x prefix)"),
         });
     }
     let unsigned =
@@ -776,4 +815,246 @@ fn write_validation_report(
     let path = run_root.join(VALIDATION_REPORT_PATH);
     fs::write(&path, encoded).map_err(|source| ExportError::IoWrite { path, source })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::{
+        BlockHeaderRef, BlockWithReceiptsRef, ReceiptLogRef, TransactionReceiptRef,
+    };
+
+    fn encode_u256_word(value: u64) -> String {
+        format!("0x{value:064x}")
+    }
+
+    fn encode_topic_address(address: &str) -> String {
+        let digits = address
+            .strip_prefix("0x")
+            .or_else(|| address.strip_prefix("0X"))
+            .unwrap_or(address);
+        format!("0x{:0>24}{digits}", "")
+    }
+
+    fn build_block_with_one_log(
+        block_number: u64,
+        tx_hash: &str,
+        log_index: u64,
+        log_address: &str,
+        topics: Vec<String>,
+        data: &str,
+    ) -> BlockWithReceiptsRef {
+        BlockWithReceiptsRef {
+            header: BlockHeaderRef {
+                block_number,
+                block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+                timestamp_secs: 0,
+            },
+            receipts: vec![TransactionReceiptRef {
+                transaction_hash: tx_hash.to_owned(),
+                transaction_index: 0,
+                block_number,
+                block_hash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .to_owned(),
+                logs: vec![ReceiptLogRef {
+                    address: log_address.to_owned(),
+                    topics,
+                    data: data.to_owned(),
+                    log_index,
+                    removed: false,
+                }],
+            }],
+        }
+    }
+
+    fn build_pool_plan(pool_address: &str, block_number: u64) -> PoolShardTargetPlan {
+        PoolShardTargetPlan {
+            pool_address: pool_address.to_owned(),
+            from_block: block_number,
+            to_block: block_number,
+            target_blocks: vec![block_number],
+        }
+    }
+
+    fn build_pool_meta_map(
+        pool_address: &str,
+        token0: &str,
+        token1: &str,
+    ) -> HashMap<String, PoolTokenMeta> {
+        let mut pool_meta_map = HashMap::<String, PoolTokenMeta>::new();
+        pool_meta_map.insert(
+            pool_address.to_owned(),
+            PoolTokenMeta {
+                token0: token0.to_owned(),
+                token1: token1.to_owned(),
+            },
+        );
+        pool_meta_map
+    }
+
+    #[test]
+    fn transfer_topics3_with_0x_amount_is_parsed_as_erc20() {
+        let pool_address = "0x1111111111111111111111111111111111111111";
+        let external_address = "0x9999999999999999999999999999999999999999";
+        let token0 = "0x2222222222222222222222222222222222222222";
+        let token1 = "0x3333333333333333333333333333333333333333";
+        let block_number = 27_800_001u64;
+        let plans = vec![build_pool_plan(pool_address, block_number)];
+        let pool_meta_map = build_pool_meta_map(pool_address, token0, token1);
+        let block = build_block_with_one_log(
+            block_number,
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            0,
+            token0,
+            vec![
+                TRANSFER_TOPIC0.to_owned(),
+                encode_topic_address(pool_address),
+                encode_topic_address(external_address),
+            ],
+            &encode_u256_word(15),
+        );
+
+        let out = build_transfer_deltas_by_pool(&[block], &plans, &pool_meta_map)
+            .expect("erc20 transfer should parse");
+
+        let per_pool = out
+            .get(pool_address)
+            .expect("pool delta should exist for tracked pool");
+        let delta = per_pool
+            .get(&block_number)
+            .expect("delta should be recorded for transfer block");
+        assert_eq!(delta.token0, BigInt::from(-15));
+        assert_eq!(delta.token1, BigInt::from(0));
+    }
+
+    #[test]
+    fn transfer_topics4_erc721_style_is_ignored() {
+        let pool_address = "0x1111111111111111111111111111111111111111";
+        let external_address = "0x9999999999999999999999999999999999999999";
+        let token0 = "0x2222222222222222222222222222222222222222";
+        let token1 = "0x3333333333333333333333333333333333333333";
+        let block_number = 27_800_002u64;
+        let plans = vec![build_pool_plan(pool_address, block_number)];
+        let pool_meta_map = build_pool_meta_map(pool_address, token0, token1);
+        let block = build_block_with_one_log(
+            block_number,
+            "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            1,
+            token0,
+            vec![
+                TRANSFER_TOPIC0.to_owned(),
+                encode_topic_address(pool_address),
+                encode_topic_address(external_address),
+                encode_u256_word(42),
+            ],
+            "0x",
+        );
+
+        let out = build_transfer_deltas_by_pool(&[block], &plans, &pool_meta_map)
+            .expect("erc721-style transfer should be ignored");
+        assert!(
+            out.is_empty(),
+            "erc721-style transfer must not affect deltas"
+        );
+    }
+
+    #[test]
+    fn transfer_topics3_invalid_amount_for_untracked_addresses_is_ignored() {
+        let pool_address = "0x1111111111111111111111111111111111111111";
+        let external_address = "0x9999999999999999999999999999999999999999";
+        let unrelated_address = "0x8888888888888888888888888888888888888888";
+        let token0 = "0x2222222222222222222222222222222222222222";
+        let token1 = "0x3333333333333333333333333333333333333333";
+        let block_number = 27_800_003u64;
+        let plans = vec![build_pool_plan(pool_address, block_number)];
+        let pool_meta_map = build_pool_meta_map(pool_address, token0, token1);
+        let block = build_block_with_one_log(
+            block_number,
+            "0xabababababababababababababababababababababababababababababababab",
+            2,
+            token0,
+            vec![
+                TRANSFER_TOPIC0.to_owned(),
+                encode_topic_address(external_address),
+                encode_topic_address(unrelated_address),
+            ],
+            "0x1234",
+        );
+
+        let out = build_transfer_deltas_by_pool(&[block], &plans, &pool_meta_map)
+            .expect("untracked invalid transfer should be ignored");
+        assert!(
+            out.is_empty(),
+            "untracked invalid transfer must not affect deltas"
+        );
+    }
+
+    #[test]
+    fn transfer_topics3_invalid_amount_for_untracked_token_is_ignored() {
+        let pool_address = "0x1111111111111111111111111111111111111111";
+        let external_address = "0x9999999999999999999999999999999999999999";
+        let token0 = "0x2222222222222222222222222222222222222222";
+        let token1 = "0x3333333333333333333333333333333333333333";
+        let unrelated_token = "0x4444444444444444444444444444444444444444";
+        let block_number = 27_800_004u64;
+        let plans = vec![build_pool_plan(pool_address, block_number)];
+        let pool_meta_map = build_pool_meta_map(pool_address, token0, token1);
+        let block = build_block_with_one_log(
+            block_number,
+            "0xbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc",
+            3,
+            unrelated_token,
+            vec![
+                TRANSFER_TOPIC0.to_owned(),
+                encode_topic_address(pool_address),
+                encode_topic_address(external_address),
+            ],
+            "0x1234",
+        );
+
+        let out = build_transfer_deltas_by_pool(&[block], &plans, &pool_meta_map)
+            .expect("tracked pool transfer with unrelated token should be ignored");
+        assert!(
+            out.is_empty(),
+            "transfer with unrelated token must not affect deltas"
+        );
+    }
+
+    #[test]
+    fn transfer_topics3_invalid_amount_has_log_context() {
+        let pool_address = "0x1111111111111111111111111111111111111111";
+        let external_address = "0x9999999999999999999999999999999999999999";
+        let token0 = "0x2222222222222222222222222222222222222222";
+        let token1 = "0x3333333333333333333333333333333333333333";
+        let block_number = 27_800_005u64;
+        let tx_hash = "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+        let log_index = 7u64;
+        let plans = vec![build_pool_plan(pool_address, block_number)];
+        let pool_meta_map = build_pool_meta_map(pool_address, token0, token1);
+        let block = build_block_with_one_log(
+            block_number,
+            tx_hash,
+            log_index,
+            token0,
+            vec![
+                TRANSFER_TOPIC0.to_owned(),
+                encode_topic_address(pool_address),
+                encode_topic_address(external_address),
+            ],
+            "0x1234",
+        );
+
+        let error = build_transfer_deltas_by_pool(&[block], &plans, &pool_meta_map)
+            .expect_err("invalid erc20 amount should fail fast");
+        let message = match error {
+            ExportError::InvalidRequest { message } => message,
+            other => panic!("unexpected error variant: {other}"),
+        };
+        assert!(message.contains("transfer.data"));
+        assert!(message.contains(token0));
+        assert!(message.contains(&format!("block_number={block_number}")));
+        assert!(message.contains(tx_hash));
+        assert!(message.contains(&format!("log_index={log_index}")));
+    }
 }

@@ -8,7 +8,7 @@ use crate::{
         UnresolvedStableSideToken, V3SwapPayloadShape,
     },
     protocol::registry::{resolve_protocol, NormalizedProtocol, ProtocolResolution},
-    source::{normalize_evm_address, IndexerMetadataProvider, SourceError},
+    source::{normalize_evm_address, PoolMetadataProvider, SourceError, TokenMetadataProvider},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,25 +54,34 @@ pub enum CatalogError {
     Source(#[from] SourceError),
 }
 
-pub fn build_resolved_pool_catalog_from_json<P>(
-    metadata: &P,
+pub fn build_resolved_pool_catalog_from_json<P, T>(
+    pool_metadata_provider: &P,
+    token_metadata_provider: &T,
     selected_pool_addresses: &[String],
     stable_tokens_json: &str,
 ) -> Result<ResolvedPoolCatalog, CatalogError>
 where
-    P: IndexerMetadataProvider,
+    P: PoolMetadataProvider,
+    T: TokenMetadataProvider,
 {
     let stable_tokens = validate_stable_token_list_str(stable_tokens_json)?;
-    build_resolved_pool_catalog(metadata, selected_pool_addresses, &stable_tokens)
+    build_resolved_pool_catalog(
+        pool_metadata_provider,
+        token_metadata_provider,
+        selected_pool_addresses,
+        &stable_tokens,
+    )
 }
 
-pub fn build_resolved_pool_catalog<P>(
-    metadata: &P,
+pub fn build_resolved_pool_catalog<P, T>(
+    pool_metadata_provider: &P,
+    token_metadata_provider: &T,
     selected_pool_addresses: &[String],
     stable_tokens: &StableTokenList,
 ) -> Result<ResolvedPoolCatalog, CatalogError>
 where
-    P: IndexerMetadataProvider,
+    P: PoolMetadataProvider,
+    T: TokenMetadataProvider,
 {
     let stable_allowlist = build_stable_allowlist(stable_tokens)?;
     let mut out = ResolvedPoolCatalog::default();
@@ -89,7 +98,7 @@ where
             }
         };
 
-        let pool = match metadata.fetch_pool_metadata(&normalized_pool) {
+        let pool = match pool_metadata_provider.fetch_pool_metadata(&normalized_pool) {
             Ok(pool) => pool,
             Err(SourceError::NotFound { .. }) => {
                 out.unsupported_or_invalid.push(UnsupportedOrInvalidPool {
@@ -151,7 +160,11 @@ where
             }
         };
 
-        let token0 = match fetch_resolved_token(metadata, &pool.tokens[0])? {
+        let token0 = match fetch_resolved_token(
+            token_metadata_provider,
+            &pool.tokens[0],
+            creation_block_number,
+        )? {
             Some(token) => token,
             None => {
                 out.unsupported_or_invalid.push(UnsupportedOrInvalidPool {
@@ -161,7 +174,11 @@ where
                 continue;
             }
         };
-        let token1 = match fetch_resolved_token(metadata, &pool.tokens[1])? {
+        let token1 = match fetch_resolved_token(
+            token_metadata_provider,
+            &pool.tokens[1],
+            creation_block_number,
+        )? {
             Some(token) => token,
             None => {
                 out.unsupported_or_invalid.push(UnsupportedOrInvalidPool {
@@ -218,40 +235,34 @@ fn build_stable_allowlist(stable_tokens: &StableTokenList) -> Result<HashSet<Str
         .collect()
 }
 
-fn fetch_resolved_token<P>(
-    metadata: &P,
+fn fetch_resolved_token<T>(
+    token_metadata_provider: &T,
     token_address: &str,
+    block_number: u64,
 ) -> Result<Option<ResolvedTokenRef>, CatalogError>
 where
-    P: IndexerMetadataProvider,
+    T: TokenMetadataProvider,
 {
-    let token = match metadata.fetch_token_metadata(token_address) {
-        Ok(token) => token,
+    let token = match token_metadata_provider.fetch_token_metadata(token_address, block_number) {
+        Ok(Some(token)) => token,
+        Ok(None) => return Ok(None),
         Err(SourceError::NotFound { .. }) => return Ok(None),
         Err(error) => return Err(CatalogError::Source(error)),
     };
-    let symbol = match token
-        .symbol
-        .as_ref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    {
-        Some(value) => value.to_owned(),
-        None => return Ok(None),
-    };
-    let name = match token
-        .name
-        .as_ref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    {
-        Some(value) => value.to_owned(),
-        None => return Ok(None),
-    };
+
+    let symbol = token.symbol.trim();
+    if symbol.is_empty() {
+        return Ok(None);
+    }
+    let name = token.name.trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+
     Ok(Some(ResolvedTokenRef {
         address: token.address,
         decimals: token.decimals,
-        symbol,
-        name,
+        symbol: symbol.to_owned(),
+        name: name.to_owned(),
     }))
 }

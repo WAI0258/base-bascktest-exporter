@@ -1,13 +1,21 @@
 use num_bigint::BigUint;
-use num_traits::Num;
+use num_traits::{Num, ToPrimitive};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha3::{Digest, Keccak256};
 
 use super::{
     normalize_evm_address, normalize_hex_bytes, normalize_prefixed_hex, parse_hex_u64,
-    BlockHeaderRef, BlockWithReceiptsRef, ReceiptLogRef, SourceError, TransactionReceiptRef,
+    BlockHeaderRef, BlockWithReceiptsRef, ReceiptLogRef, SourceError, TokenMetadataProvider,
+    TokenMetadataRef, TransactionReceiptRef,
 };
+
+const ERC20_BALANCE_OF_SELECTOR: &str = "0x70a08231";
+const ERC20_DECIMALS_SELECTOR: &str = "0x313ce567";
+const ERC20_SYMBOL_SELECTOR: &str = "0x95d89b41";
+const ERC20_NAME_SELECTOR: &str = "0x06fdde03";
+const AERODROME_V3_GET_SWAP_FEE_SIGNATURE: &str = "getSwapFee(address)";
 
 pub trait JsonRpcClient {
     fn call(&self, method: &str, params: Vec<Value>) -> Result<Value, SourceError>;
@@ -210,6 +218,76 @@ where
         parse_balance_of_result_to_decimal("eth_call.result", &response)
     }
 
+    pub fn fetch_token_metadata(
+        &self,
+        token_address: &str,
+        block_number: u64,
+    ) -> Result<Option<TokenMetadataRef>, SourceError> {
+        let token_address = normalize_evm_address("token_address", token_address)?;
+
+        let decimals_raw = match map_metadata_call_result(self.eth_call_at_block(
+            &token_address,
+            encode_erc20_decimals_calldata(),
+            block_number,
+        ))? {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+        let decimals = match decode_abi_uint_u8(&decimals_raw) {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+
+        let symbol_raw = match map_metadata_call_result(self.eth_call_at_block(
+            &token_address,
+            encode_erc20_symbol_calldata(),
+            block_number,
+        ))? {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+        let symbol = match decode_abi_dynamic_string(&symbol_raw) {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+
+        let name_raw = match map_metadata_call_result(self.eth_call_at_block(
+            &token_address,
+            encode_erc20_name_calldata(),
+            block_number,
+        ))? {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+        let name = match decode_abi_dynamic_string(&name_raw) {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+
+        Ok(Some(TokenMetadataRef {
+            address: token_address,
+            decimals,
+            symbol,
+            name,
+        }))
+    }
+
+    pub fn fetch_aerodrome_v3_fee(
+        &self,
+        factory_address: &str,
+        pool_address: &str,
+        block_number: u64,
+    ) -> Result<u32, SourceError> {
+        let factory_address = normalize_evm_address("factory_address", factory_address)?;
+        let call_data = encode_aerodrome_v3_get_swap_fee_calldata(pool_address)?;
+        let response = self.eth_call_at_block(&factory_address, &call_data, block_number)?;
+        decode_abi_uint_u32(&response).ok_or_else(|| SourceError::InvalidRpcResponse {
+            message: format!(
+                "failed to decode AerodromeV3 getSwapFee(address) result for pool {pool_address}"
+            ),
+        })
+    }
+
     fn call_and_decode<T>(&self, method: &str, params: Vec<Value>) -> Result<T, SourceError>
     where
         T: DeserializeOwned,
@@ -222,9 +300,52 @@ where
     }
 }
 
+impl<C> TokenMetadataProvider for BaseNodeRpcAdapter<C>
+where
+    C: JsonRpcClient,
+{
+    fn fetch_token_metadata(
+        &self,
+        token_address: &str,
+        block_number: u64,
+    ) -> Result<Option<TokenMetadataRef>, SourceError> {
+        BaseNodeRpcAdapter::fetch_token_metadata(self, token_address, block_number)
+    }
+}
+
 fn encode_erc20_balance_of_calldata(owner_address: &str) -> String {
     let owner_digits = owner_address.trim_start_matches("0x");
-    format!("0x70a08231{owner_digits:0>64}")
+    format!("{ERC20_BALANCE_OF_SELECTOR}{owner_digits:0>64}")
+}
+
+fn encode_erc20_decimals_calldata() -> &'static str {
+    ERC20_DECIMALS_SELECTOR
+}
+
+fn encode_erc20_symbol_calldata() -> &'static str {
+    ERC20_SYMBOL_SELECTOR
+}
+
+fn encode_erc20_name_calldata() -> &'static str {
+    ERC20_NAME_SELECTOR
+}
+
+pub(crate) fn encode_aerodrome_v3_get_swap_fee_calldata(
+    pool_address: &str,
+) -> Result<String, SourceError> {
+    encode_single_address_call(AERODROME_V3_GET_SWAP_FEE_SIGNATURE, pool_address)
+}
+
+fn encode_single_address_call(signature: &str, address: &str) -> Result<String, SourceError> {
+    let normalized_address = normalize_evm_address("call.address", address)?;
+    let mut hasher = Keccak256::new();
+    hasher.update(signature.as_bytes());
+    let selector = hasher.finalize();
+    Ok(format!(
+        "0x{}{:0>64}",
+        hex::encode(&selector[..4]),
+        normalized_address.trim_start_matches("0x")
+    ))
 }
 
 fn normalize_hex_call_result(field: &'static str, value: &str) -> Result<String, SourceError> {
@@ -249,6 +370,99 @@ fn normalize_hex_call_result(field: &'static str, value: &str) -> Result<String,
         return Ok(format!("0x{}", digits.to_ascii_lowercase()));
     }
     Ok(format!("0x0{}", digits.to_ascii_lowercase()))
+}
+
+fn map_metadata_call_result(
+    result: Result<String, SourceError>,
+) -> Result<Option<String>, SourceError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(SourceError::InvalidHexScalar {
+            field: "eth_call.result",
+            ..
+        }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn decode_abi_uint_u8(value: &str) -> Option<u8> {
+    let bytes = decode_hex_bytes(value)?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    BigUint::from_bytes_be(&bytes).to_u8()
+}
+
+fn decode_abi_uint_u32(value: &str) -> Option<u32> {
+    let bytes = decode_hex_bytes(value)?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    BigUint::from_bytes_be(&bytes).to_u32()
+}
+
+fn decode_abi_dynamic_string(value: &str) -> Option<String> {
+    let bytes = decode_hex_bytes(value)?;
+    if bytes.len() < 64 || bytes.len() % 32 != 0 {
+        return None;
+    }
+
+    let offset = decode_abi_word_as_usize(&bytes[0..32])?;
+    if offset % 32 != 0 {
+        return None;
+    }
+
+    let len_word_end = offset.checked_add(32)?;
+    if len_word_end > bytes.len() {
+        return None;
+    }
+    let data_len = decode_abi_word_as_usize(&bytes[offset..len_word_end])?;
+
+    let data_start = len_word_end;
+    let data_end = data_start.checked_add(data_len)?;
+    if data_end > bytes.len() {
+        return None;
+    }
+
+    let padded_len = data_len.checked_add(31)? / 32 * 32;
+    let padded_end = data_start.checked_add(padded_len)?;
+    if padded_end > bytes.len() {
+        return None;
+    }
+
+    let string_bytes = &bytes[data_start..data_end];
+    let string = std::str::from_utf8(string_bytes).ok()?.trim();
+    if string.is_empty() {
+        return None;
+    }
+    Some(string.to_owned())
+}
+
+fn decode_hex_bytes(value: &str) -> Option<Vec<u8>> {
+    let digits = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))?;
+    if digits.is_empty() || digits.len() % 2 != 0 {
+        return None;
+    }
+    hex::decode(digits).ok()
+}
+
+fn decode_abi_word_as_usize(word: &[u8]) -> Option<usize> {
+    if word.len() != 32 {
+        return None;
+    }
+    let width = std::mem::size_of::<usize>();
+    if word[..(32 - width)].iter().any(|byte| *byte != 0) {
+        return None;
+    }
+
+    let mut out = 0usize;
+    for byte in &word[(32 - width)..] {
+        out = out.checked_mul(256)?;
+        out = out.checked_add(usize::from(*byte))?;
+    }
+    Some(out)
 }
 
 fn parse_balance_of_result_to_decimal(
